@@ -1,40 +1,47 @@
-# Span<T> example: summing a CSV line
+# Span<T> example: parsing a sensor reading line
 
-`SumCsvValues` sums the integers in a comma separated line such as `"12, 7, 105, -3"`.
-Whitespace around values is ignored and empty values are skipped.
+`SensorReadingParser` turns a CSV line such as `"17,1793190896,21.5"` into a
+`SensorReading(int SensorId, long UnixSeconds, double Value)`.
+It throws `FormatException` when the line does not have exactly three fields or a field is invalid.
 
-There are two implementations in [CsvExtensions.cs](CsvExtensions.cs) with identical behavior:
+The result is a struct of numbers, not strings. That is what makes this a fair test: the fields of
+the line are only needed long enough to be parsed, so any string created for them is pure garbage.
 
-- **Without span**: `line.Split(',', ...)` and `int.Parse(string)` for each part.
-  `Split` allocates an array plus one new `string` per value.
-- **With span**: walks the original string with `ReadOnlySpan<char>`, using `IndexOf`, slicing and `Trim`,
-  then calls `int.Parse(ReadOnlySpan<char>)`. Slices are just a pointer and a length into the
-  original string, so nothing is copied or allocated.
+There are two implementations in [SensorReadingParser.cs](SensorReadingParser.cs) with identical behavior:
+
+- **Without span**: `line.Split(',')` and `TryParse(string)` for each field.
+  `Split` allocates an array plus one new `string` per field.
+- **With span**: `ReadOnlySpan<char>.Split` writes the field boundaries into a `stackalloc`ed
+  `Span<Range>`, each field is sliced from the original line and parsed with `TryParse(ReadOnlySpan<char>)`.
+  Slices are just a pointer and a length into the original string, so nothing is copied or allocated.
+
+The benchmark parses a whole batch of lines (think of reading a file) and sums the values.
 
 ## Results
 
 Apple M4, macOS, .NET SDK 10.0.100, BenchmarkDotNet 0.15.8, default job, Release build.
 
-| Values | Method      |          Mean | Ratio | Gen0 | Gen1 |  Allocated |
-|-------:|-------------|--------------:|------:|-----:|-----:|-----------:|
-|     10 | WithoutSpan |     132.84 ns |  1.00 |  0.0553 |    - |      464 B |
-|     10 | WithSpan    |      71.90 ns |  0.54 |    - |    - |          0 |
-|    100 | WithoutSpan |   1,309.01 ns |  1.00 |  0.5302 | 0.0076 |    4,448 B |
-|    100 | WithSpan    |     716.66 ns |  0.55 |    - |    - |          0 |
-| 10,000 | WithoutSpan | 134,487.48 ns |  1.00 | 52.0020 | 20.7520 | 436,216 B |
-| 10,000 | WithSpan    |  84,932.98 ns |  0.63 |    - |    - |          0 |
+| Lines  | Method      |       Mean | Ratio |     Gen0 |   Allocated |
+|-------:|-------------|-----------:|------:|---------:|------------:|
+|    100 | WithoutSpan |   5.525 μs |  1.00 |   1.9073 |    15,976 B |
+|    100 | WithSpan    |   4.774 μs |  0.86 |        - |           0 |
+| 10,000 | WithoutSpan | 562.370 μs |  1.00 | 190.4297 | 1,598,504 B |
+| 10,000 | WithSpan    | 493.995 μs |  0.88 |        - |           0 |
 
 ## What the numbers say
 
-- **Allocations drop to zero.** The classic version allocates roughly 44 bytes per value
-  (436 KB for 10,000 values). The span version allocates nothing, so the garbage collector never has work to do.
-- **It is also faster**: about 1.8x for short lines and about 1.6x for long ones. Most of the saved time is
-  the cost of allocating and copying all those strings.
-- **The gap narrows on long lines** because `int.Parse` itself becomes a bigger share of the time,
-  and parsing costs the same in both versions.
-- **GC pressure is the bigger win in practice.** In the baseline, a 10,000 value line triggers Gen1
-  collections (20.75 per 1,000 calls). In a hot path such as a web request handler or a file import, this
-  is what hurts throughput and tail latency, and a single microbenchmark timing does not show it.
+- **Allocations drop to zero.** The classic version allocates about 160 bytes per line (an array and three
+  strings). The span version allocates nothing, so the garbage collector never has work to do.
+- **It is also faster, but modestly**: about 12 to 14%. Parsing the numbers costs the same in both versions,
+  so only the allocating and copying is saved.
+- **GC pressure is the bigger win in practice.** Importing 10,000 lines creates 1.6 MB of short-lived garbage
+  in the baseline (190 Gen0 collections per 1,000 calls). In a hot path such as a file import or a message
+  consumer, this is what hurts throughput and tail latency.
+
+## Why not return strings?
+
+A parser that returns `string[]` or `List<string>` needs the strings anyway, so `Span` cannot save anything.
+It pays off when the strings are only an intermediate step towards typed values.
 
 ## Run it yourself
 
