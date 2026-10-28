@@ -1,9 +1,7 @@
-﻿namespace DotNetExamples.Span;
+using BenchmarkDotNet.Running;
+using DotNetExamples.Span;
 
-class Program
-{
-    static void Main(string[] args)
-    {
-        Console.WriteLine("Hello, World!");
-    }
-}
+// Run in Release, otherwise the numbers are meaningless:
+//   dotnet run -c Release --project DotNetExamples.Span
+// Pass BenchmarkDotNet args to filter, e.g. -- --filter "*CsvBenchmarks*"
+BenchmarkSwitcher.FromAssembly(typeof(CsvBenchmarks).Assembly).Run(args);
